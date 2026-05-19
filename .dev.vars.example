@@ -1,0 +1,9 @@
+TIMEZONE=Asia/Shanghai
+OWNER_USER_ID=self
+WORKER_PUBLIC_BASE_URL=https://your-worker-domain.example.com
+WORKERS_AI_TEXT_MODEL=@cf/moonshotai/kimi-k2.6
+WORKERS_AI_IMAGE_MODEL=@cf/meta/llama-3.2-11b-vision-instruct
+TELEGRAM_BOT_TOKEN=replace-with-telegram-bot-token
+OWNER_TELEGRAM_CHAT_ID=your-chat-id-after-first-message
+DASHBOARD_PASSWORD=your-dashboard-password
+SESSION_SECRET=replace-with-a-long-random-string

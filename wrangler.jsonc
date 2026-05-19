@@ -1,0 +1,70 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "ck-body-management",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-05-18",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"observability": {
+		"enabled": true,
+		"head_sampling_rate": 1
+	},
+  "vars": {
+    "TIMEZONE": "Asia/Shanghai",
+    "OWNER_USER_ID": "self",
+    "WORKERS_AI_TEXT_MODEL": "@cf/moonshotai/kimi-k2.6",
+    "WORKERS_AI_IMAGE_MODEL": "@cf/meta/llama-3.2-11b-vision-instruct",
+    "WORKER_PUBLIC_BASE_URL": "https://your-worker-domain.example.com"
+  },
+	"ai": {
+		"binding": "AI"
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "ck-body-management-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+			"migrations_dir": "./migrations"
+		},
+		{
+			"binding": "ck_body_management_db",
+			"database_name": "ck-body-management-db",
+			"database_id": "00000000-0000-0000-0000-000000000000"
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "PHOTOS",
+			"bucket_name": "ck-body-management-photos"
+		},
+		{
+			"bucket_name": "ck-body-management-photos",
+			"binding": "ck_body_management_photos"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "BODY_COACH_AGENT",
+				"class_name": "BodyCoachAgent"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"BodyCoachAgent"
+			]
+		}
+	],
+	"triggers": {
+		"crons": [
+			"30 1 * * *",
+			"30 4 * * *",
+			"0 10 * * *",
+			"0 13 * * SUN"
+		]
+	}
+}

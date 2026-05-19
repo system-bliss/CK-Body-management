@@ -1,0 +1,13 @@
+node_modules/
+.wrangler/
+.wrangler-dev-logs/
+.dev.vars
+.dev.vars.local
+.env
+.env.*
+!.env.example
+dist/
+coverage/
+.superpowers/
+npm-debug.log*
+.DS_Store
