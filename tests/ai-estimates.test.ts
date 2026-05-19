@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildRecordReviewPrompt,
   buildRecordCoachPrompt,
   buildDailyReportPrompt,
   buildImageEstimatePrompt,
@@ -11,11 +12,12 @@ import {
   extractModelText,
   generateRecordCoachFeedback,
   generateDailyReport,
+  generateRecordReviewFeedback,
   generateReminderText,
   parseAiEstimateJson,
   summarizeEstimate
 } from "../src/lib/ai";
-import type { DashboardData, Env } from "../src/types";
+import type { DailyReviewData, DashboardData, Env } from "../src/types";
 
 describe("AI estimate parsing", () => {
   it("extracts valid estimate JSON from fenced model output", () => {
@@ -93,6 +95,14 @@ describe("AI estimate parsing", () => {
     expect(prompt).toContain("出现“早餐/早饭/午餐/午饭/晚餐/晚饭/加餐”等餐次词时，entryType 必须优先判为 meal");
     expect(prompt).toContain("常见错别字");
     expect(prompt).toContain("用户记录：早餐：两个鸡蛋，一大杯美式");
+  });
+
+  it("tells the model to prefer exercise classification when exercise keywords are present", () => {
+    const prompt = buildTextEstimatePrompt("今日运动：步行5600步，回家后进行健腹轮120个，深蹲100个", "unknown");
+
+    expect(prompt).toContain("出现“运动/步行/步数/健腹轮/深蹲");
+    expect(prompt).toContain("entryType 必须优先判为 exercise");
+    expect(prompt).toContain("用户记录：今日运动：步行5600步，回家后进行健腹轮120个，深蹲100个");
   });
 
   it("includes profile context in text estimate prompts when available", () => {
@@ -212,6 +222,28 @@ describe("AI estimate parsing", () => {
     expect(estimate.entryType).toBe("measurement");
     expect(estimate.confidence).toBe("high");
     expect(estimate.notes).toContain("体重");
+  });
+
+  it("uses a local exercise fallback when explicit exercise text is obvious", async () => {
+    let aiCalls = 0;
+    const env = {
+      AI: {
+        run: async () => {
+          aiCalls += 1;
+          return "无法判断";
+        }
+      }
+    } as unknown as Env;
+
+    const estimate = await estimateTextRecord(env, "今日运动：步行5600步，回家后进行健腹轮120个，深蹲100个", "unknown");
+
+    expect(aiCalls).toBe(1);
+    expect(estimate.entryType).toBe("exercise");
+    expect(estimate.exerciseMinutes).toBeGreaterThan(0);
+    expect(estimate.exerciseCaloriesKcal).toBeGreaterThan(0);
+    expect(estimate.notes).toContain("步行 5600 步");
+    expect(estimate.notes).toContain("健腹轮 120 个");
+    expect(estimate.notes).toContain("深蹲 100 个");
   });
 
   it("keeps a captioned meal photo recordable when the vision model output is unusable", async () => {
@@ -350,6 +382,108 @@ describe("AI estimate parsing", () => {
     expect(feedback).not.toContain("置信度");
   });
 
+  it("builds a record review prompt with body, meal, exercise and phase-score requirements", () => {
+    const prompt = buildRecordReviewPrompt(
+      {
+        entryType: "exercise",
+        items: [],
+        exerciseMinutes: 69,
+        exerciseCaloriesKcal: 307,
+        confidence: "medium",
+        notes: "步行 5600 步，健腹轮 120 个，深蹲 100 个",
+        estimated: true
+      },
+      {
+        daily: dailyReviewData(),
+        recordDate: "2026-05-18",
+        localDate: "2026-05-19",
+        rawText: "昨天运动：步行5600步，回家后进行健腹轮120个，深蹲100个"
+      }
+    );
+
+    expect(prompt).toContain("目标日期：2026-05-18");
+    expect(prompt).toContain("这是一条补记或复盘过去日期的记录");
+    expect(prompt).toContain("体重 86 kg");
+    expect(prompt).toContain("早餐评分");
+    expect(prompt).toContain("午餐评分");
+    expect(prompt).toContain("晚餐评分");
+    expect(prompt).toContain("运动评分");
+    expect(prompt).toContain("全天综合评分");
+    expect(prompt).toContain("步行 5600 步");
+  });
+
+  it("uses AI review feedback for yesterday records instead of local fallback when AI responds", async () => {
+    const env = {
+      AI: {
+        run: async () => ({
+          response:
+            "已按昨日运动记录复盘：运动评分：86/100。\n早餐评分：78/100。\n午餐评分：82/100。\n晚餐评分：暂无。\n昨日全天综合评分：81/100。"
+        })
+      },
+      WORKERS_AI_TEXT_MODEL: "text-model"
+    } as unknown as Env;
+
+    const feedback = await generateRecordReviewFeedback(
+      env,
+      {
+        entryType: "exercise",
+        items: [],
+        exerciseMinutes: 69,
+        exerciseCaloriesKcal: 307,
+        confidence: "medium",
+        notes: "步行 5600 步，健腹轮 120 个，深蹲 100 个",
+        estimated: true
+      },
+      {
+        daily: dailyReviewData(),
+        recordDate: "2026-05-18",
+        localDate: "2026-05-19",
+        rawText: "昨天运动：步行5600步，回家后进行健腹轮120个，深蹲100个"
+      }
+    );
+
+    expect(feedback).toContain("已按昨日运动记录复盘");
+    expect(feedback).toContain("昨日全天综合评分：81/100");
+    expect(feedback).not.toContain("下一步建议：晚餐优先");
+  });
+
+  it("falls back to local phase scoring only when review AI cannot be called", async () => {
+    const env = {
+      AI: {
+        run: async () => {
+          throw new Error("AI unavailable");
+        }
+      },
+      WORKERS_AI_TEXT_MODEL: "text-model"
+    } as unknown as Env;
+
+    const feedback = await generateRecordReviewFeedback(
+      env,
+      {
+        entryType: "exercise",
+        items: [],
+        exerciseMinutes: 69,
+        exerciseCaloriesKcal: 307,
+        confidence: "medium",
+        notes: "步行 5600 步，健腹轮 120 个，深蹲 100 个",
+        estimated: true
+      },
+      {
+        daily: dailyReviewData(),
+        recordDate: "2026-05-18",
+        localDate: "2026-05-19",
+        rawText: "昨天运动：步行5600步，回家后进行健腹轮120个，深蹲100个"
+      }
+    );
+
+    expect(feedback).toContain("已按昨日运动记录复盘");
+    expect(feedback).toContain("早餐评分");
+    expect(feedback).toContain("午餐评分");
+    expect(feedback).toContain("晚餐评分：暂无");
+    expect(feedback).toContain("运动评分");
+    expect(feedback).toContain("昨日全天综合评分");
+  });
+
   it("falls back to deterministic daily reports when AI fails", async () => {
     const env = {
       AI: {
@@ -477,6 +611,27 @@ function dashboardData(overrides: Partial<DashboardData> = {}): DashboardData {
     measurements: [{ measured_at: "2026-05-19 09:20:00", weight_kg: 72.4, body_fat_percent: null, waist_cm: null }],
     estimates: [],
     reports: [],
+    ...overrides
+  };
+}
+
+function dailyReviewData(overrides: Partial<DailyReviewData> = {}): DailyReviewData {
+  return {
+    date: "2026-05-18",
+    mealCount: 2,
+    totalCaloriesKcal: 1320,
+    totalProteinG: 86,
+    totalCarbsG: 138,
+    totalFatG: 42,
+    exerciseMinutes: 69,
+    exerciseCaloriesKcal: 307,
+    latestWeightKg: 86,
+    meals: [
+      { log_date: "2026-05-18", meal_type: "breakfast", calories_kcal: 420, protein_g: 26, carbs_g: 38, fat_g: 14, summary: "鸡蛋、咖啡" },
+      { log_date: "2026-05-18", meal_type: "lunch", calories_kcal: 900, protein_g: 60, carbs_g: 100, fat_g: 28, summary: "鸡胸肉饭" }
+    ],
+    exercises: [{ log_date: "2026-05-18", minutes: 69, calories_kcal: 307, summary: "步行 5600 步，健腹轮 120 个，深蹲 100 个" }],
+    profile: { age: 26, heightCm: 176, gender: "male" },
     ...overrides
   };
 }

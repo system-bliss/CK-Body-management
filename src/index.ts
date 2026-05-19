@@ -1,11 +1,11 @@
 import { routeAgentRequest } from "agents";
 import { BodyCoachAgent } from "./agent";
 import type { AiEstimate, Env } from "./types";
-import { estimateImageRecord, estimateTextRecord, generateDailyReport, generateRecordCoachFeedback, generateReminderText, generateWeeklyReport, summarizeEstimate } from "./lib/ai";
+import { estimateImageRecord, estimateTextRecord, generateDailyReport, generateRecordReviewFeedback, generateReminderText, generateWeeklyReport, summarizeEstimate } from "./lib/ai";
 import { clearSessionCookie, createSessionCookie, verifyPassword, verifySessionCookie } from "./lib/dashboard-auth";
 import { renderDashboard, renderLogin } from "./lib/dashboard";
 import { missingRequiredEnvKeys } from "./lib/env";
-import { detectMealType, parseBodyDataText, summarizeBodyDataPatch, previousLocalDate, weekRangeFor } from "./lib/records";
+import { detectMealType, localDate, parseBodyDataText, recordDateForText, summarizeBodyDataPatch, previousLocalDate, weekRangeFor } from "./lib/records";
 import {
   buildDailyReviewData,
   buildWeeklyReviewData,
@@ -91,22 +91,29 @@ async function handleIncomingTelegramMessage(env: Env, message: TelegramInboundM
       photoKey,
       contentType: media.contentType
     });
-    const dashboardData = await getDashboardData(env, storedMessage.fromUserName);
-    const coachFeedback = await generateRecordCoachFeedback(env, estimate, { dashboard: dashboardData });
+    const recordDate = localDate(env.TIMEZONE);
+    const daily = await buildDailyReviewData(env, storedMessage.fromUserName, recordDate);
+    const coachFeedback = await generateRecordReviewFeedback(env, estimate, {
+      daily,
+      recordDate,
+      localDate: recordDate,
+      rawText: message.content || undefined
+    });
     await sendTelegramText(env, message.chatId, [summarizeEstimate(estimate), coachFeedback, "照片已保存，热量为 AI 估算。"].filter(Boolean).join("\n"));
     return;
   }
 
   if (message.content) {
+    const recordDate = recordDateForText(message.content, env.TIMEZONE);
     const mealType = detectMealType(message.content);
     const bodyData = parseBodyDataText(message.content);
     const profile = await getProfile(env, storedMessage.fromUserName);
     const estimate = await estimateTextRecord(env, message.content, mealType, { ...profile, ...bodyData.profile });
-    await saveIncomingMessage(env, storedMessage, estimate, { rawText: message.content });
+    await saveIncomingMessage(env, storedMessage, estimate, { rawText: message.content, logDate: recordDate });
     await saveProfilePatch(env, storedMessage.fromUserName, bodyData.profile);
-    await saveMeasurements(env, storedMessage.fromUserName, bodyData.measurements);
-    const dashboardData = await getDashboardData(env, storedMessage.fromUserName);
-    await sendTelegramText(env, message.chatId, await buildTextRecordReply(env, estimate, bodyData, dashboardData));
+    await saveMeasurements(env, storedMessage.fromUserName, bodyData.measurements, recordDate);
+    const daily = await buildDailyReviewData(env, storedMessage.fromUserName, recordDate);
+    await sendTelegramText(env, message.chatId, await buildTextRecordReply(env, estimate, bodyData, daily, recordDate, localDate(env.TIMEZONE), message.content));
     return;
   }
 
@@ -209,7 +216,15 @@ function mealRecorded(meals: Array<Record<string, unknown>>, date: string, remin
   return meals.some((meal) => meal.log_date === date && meal.meal_type === reminderType);
 }
 
-async function buildTextRecordReply(env: Env, estimate: AiEstimate, bodyData: ReturnType<typeof parseBodyDataText>, dashboardData: Awaited<ReturnType<typeof getDashboardData>>): Promise<string> {
+async function buildTextRecordReply(
+  env: Env,
+  estimate: AiEstimate,
+  bodyData: ReturnType<typeof parseBodyDataText>,
+  daily: Awaited<ReturnType<typeof buildDailyReviewData>>,
+  recordDate: string,
+  currentDate: string,
+  rawText: string
+): Promise<string> {
   const bodySummary = summarizeBodyDataPatch(bodyData);
   if (estimate.entryType === "unknown" && bodySummary) {
     return `${bodySummary}\n这些基础资料会用于后续 AI 估算；缺失围度不影响记录。`;
@@ -217,8 +232,17 @@ async function buildTextRecordReply(env: Env, estimate: AiEstimate, bodyData: Re
 
   const lines = [summarizeEstimate(estimate)];
   if (bodySummary) lines.push(bodySummary);
-  if (estimate.entryType === "meal") lines.push(await generateRecordCoachFeedback(env, estimate, { dashboard: dashboardData, bodySummary }));
-  else if (estimate.entryType === "measurement") lines.push("基础资料会用于后续 AI 估算。");
+  if (estimate.entryType !== "unknown") {
+    lines.push(
+      await generateRecordReviewFeedback(env, estimate, {
+        daily,
+        recordDate,
+        localDate: currentDate,
+        rawText,
+        bodySummary
+      })
+    );
+  }
   else lines.push("你可以继续补充份量、体重或运动情况。");
   return lines.join("\n");
 }

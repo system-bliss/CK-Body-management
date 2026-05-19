@@ -4,6 +4,7 @@ import {
   localDate,
   parseBodyDataText,
   parseMeasurementText,
+  recordDateForText,
   summarizeBodyDataPatch,
   previousLocalDate,
   weekRangeFor
@@ -66,5 +67,14 @@ describe("text record helpers", () => {
       start: "2026-05-11",
       end: "2026-05-17"
     });
+  });
+
+  it("detects whether a natural-language record belongs to today or yesterday", () => {
+    const date = new Date("2026-05-19T14:30:00.000Z");
+
+    expect(recordDateForText("今日运动：步行5600步", "Asia/Shanghai", date)).toBe("2026-05-19");
+    expect(recordDateForText("昨天运动：步行5600步", "Asia/Shanghai", date)).toBe("2026-05-18");
+    expect(recordDateForText("补昨天的运动，健腹轮120个", "Asia/Shanghai", date)).toBe("2026-05-18");
+    expect(recordDateForText("昨晚深蹲100个", "Asia/Shanghai", date)).toBe("2026-05-18");
   });
 });

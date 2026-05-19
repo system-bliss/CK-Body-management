@@ -6,6 +6,7 @@ import {
   getDashboardData,
   getProfile,
   reserveTelegramUpdate,
+  saveIncomingMessage,
   saveProfilePatch,
   saveReport
 } from "../src/lib/repository";
@@ -175,6 +176,36 @@ function createProcessedUpdateDb() {
   return { db: db as unknown as D1Database, calls };
 }
 
+function createSaveMessageDb() {
+  const calls: QueryCall[] = [];
+  const db = {
+    prepare(sql: string) {
+      const call: QueryCall = { sql, binds: [] };
+      calls.push(call);
+      const statement = {
+        bind(...values: unknown[]) {
+          call.binds = values;
+          return statement;
+        },
+        async first<T>() {
+          if (sql.includes("SELECT id FROM daily_logs")) return null as T | null;
+          if (sql.includes("INSERT INTO daily_logs")) return { id: 10 } as T;
+          if (sql.includes("INSERT INTO ai_estimates")) return { id: 20 } as T;
+          return null as T | null;
+        },
+        async run() {
+          return { success: true, meta: { changes: 1 } };
+        },
+        async all<T>() {
+          return { results: [] as T[] };
+        }
+      };
+      return statement;
+    }
+  };
+  return { db: db as unknown as D1Database, calls };
+}
+
 function createEnv(db: D1Database): Env {
   return {
     DB: db,
@@ -257,5 +288,35 @@ describe("repository dashboard user resolution", () => {
     await expect(reserveTelegramUpdate(env, 1000, "123456")).resolves.toBe(false);
 
     expect(calls[0]?.sql).toContain("INSERT OR IGNORE INTO processed_telegram_updates");
+  });
+
+  it("saves incoming records against an explicit target log date", async () => {
+    const { db, calls } = createSaveMessageDb();
+    const env = createEnv(db);
+
+    await saveIncomingMessage(
+      env,
+      {
+        toUserName: "telegram",
+        fromUserName: "123456",
+        createTime: 1700000000,
+        msgType: "text",
+        content: "昨天运动：步行5600步",
+        msgId: "42"
+      },
+      {
+        entryType: "exercise",
+        items: [],
+        exerciseMinutes: 56,
+        exerciseCaloriesKcal: 224,
+        confidence: "medium",
+        notes: "步行 5600 步",
+        estimated: true
+      },
+      { rawText: "昨天运动：步行5600步", logDate: "2026-05-18" }
+    );
+
+    const dailyLogInsert = calls.find((call) => call.sql.includes("INSERT INTO daily_logs"));
+    expect(dailyLogInsert?.binds[1]).toBe("2026-05-18");
   });
 });

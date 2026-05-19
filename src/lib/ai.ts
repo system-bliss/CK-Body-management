@@ -82,12 +82,13 @@ export function buildTextEstimatePrompt(text: string, fallbackMealType?: MealTyp
     "JSON 字段必须使用：entryType, mealType, items, totalCaloriesKcal, totalProteinG, totalCarbsG, totalFatG, exerciseMinutes, exerciseCaloriesKcal, confidence, notes。",
     "entryType 只能是 meal/exercise/measurement/unknown；mealType 只能是 breakfast/lunch/dinner/snack/unknown；confidence 只能是 low/medium/high。",
     "出现“早餐/早饭/午餐/午饭/晚餐/晚饭/加餐”等餐次词时，entryType 必须优先判为 meal，除非用户明确是在记录运动或身体数据。",
+    "出现“运动/步行/步数/健腹轮/深蹲/跑步/骑行/训练”等运动词时，entryType 必须优先判为 exercise；即使缺少时长，也要根据步数、次数或常见强度估算 exerciseMinutes 和 exerciseCaloriesKcal，并在 notes 写明假设。",
     "常见错别字要结合饮食语境纠正，例如“一大杯美食”很可能是“一大杯美式咖啡”，不要因此判成 unknown 或 exercise。",
     "餐食记录必须尽量拆成 items；每个 item 尽量给 name、amount、caloriesKcal、proteinG、carbsG、fatG。",
     "如果用户给了数量但没有重量，请按中国常见份量估算，并在 notes 里写明关键假设。",
     "如果是饮品，注意是否可能无糖；不确定时按低热量饮品估算，并在 notes 里提醒补充是否加糖/奶。",
     "如果信息不足，不要把餐食判为 unknown；应输出 meal + low confidence + notes 说明需要补充什么。",
-    fallbackMealType ? `外部规则已识别餐次为 ${fallbackMealType}，除非用户文本明显矛盾，否则 mealType 使用它。` : "",
+    fallbackMealType && fallbackMealType !== "unknown" ? `外部规则已识别餐次为 ${fallbackMealType}，除非用户文本明显矛盾，否则 mealType 使用它。` : "",
     profileContext(profile),
     `用户记录：${text}`
   ]
@@ -280,6 +281,57 @@ export async function generateWeeklyReport(env: Env, data: WeeklyReviewData): Pr
   }
 }
 
+export interface RecordReviewContext {
+  daily: DailyReviewData;
+  recordDate: string;
+  localDate: string;
+  rawText?: string | undefined;
+  bodySummary?: string | undefined;
+}
+
+export function buildRecordReviewPrompt(estimate: AiEstimate, context: RecordReviewContext): string {
+  const label = recordDayLabel(context);
+  return [
+    "你是一个中文减脂塑形生活教练。用户刚补充了一条记录，请根据目标日期当天的饮食、运动、身体资料和本次记录，写 Telegram 回复中的综合评分。",
+    "必须由 AI 综合判断，不要输出置信度、判断依据、可补充字段名、Markdown 表格或医疗建议。",
+    "必须覆盖阶段分数：早餐评分、午餐评分、晚餐评分、运动评分、全天综合评分；没有记录的阶段写“暂无”，不要编造。",
+    "评分使用 100 分制，并结合体重、身高、年龄、性别、热量、蛋白质、碳水、脂肪、运动消耗和餐次完整度。",
+    context.recordDate !== context.localDate ? "这是一条补记或复盘过去日期的记录，必须明确说明按目标日期的数据复盘，不要按今天数据下结论。" : "",
+    "输出 5-8 行，每行自然短句。最后一行给下一步建议；如果是过去日期，最后一行给复盘提示。",
+    `目标日期：${context.recordDate}`,
+    `本地今天：${context.localDate}`,
+    `记录标签：${label}`,
+    `用户原文：${context.rawText ?? "未提供"}`,
+    `本次记录：${recordSummaryForReview(estimate)}`,
+    profileContext(context.daily.profile),
+    context.daily.latestWeightKg !== undefined ? `体重 ${context.daily.latestWeightKg} kg` : "体重：目标日期未记录",
+    `目标日期汇总：${context.daily.mealCount} 餐，摄入约 ${Math.round(context.daily.totalCaloriesKcal)} kcal，蛋白 ${Math.round(context.daily.totalProteinG)} g，碳水 ${Math.round(context.daily.totalCarbsG)} g，脂肪 ${Math.round(context.daily.totalFatG)} g，运动 ${Math.round(context.daily.exerciseMinutes)} 分钟，消耗 ${Math.round(context.daily.exerciseCaloriesKcal)} kcal`,
+    `目标日期餐食：${reviewRowsText(context.daily.meals)}`,
+    `目标日期运动：${reviewRowsText(context.daily.exercises)}`,
+    context.bodySummary ? `本次身体资料更新：${context.bodySummary}` : "",
+    "请直接输出给用户看的中文内容。"
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export async function generateRecordReviewFeedback(env: Env, estimate: AiEstimate, context: RecordReviewContext): Promise<string> {
+  if (estimate.entryType === "unknown") return "";
+  try {
+    const result = await env.AI.run(env.WORKERS_AI_TEXT_MODEL || DEFAULT_TEXT_MODEL, {
+      prompt: buildRecordReviewPrompt(estimate, context),
+      max_tokens: 700,
+      temperature: 0.55,
+      chat_template_kwargs: { enable_thinking: false }
+    });
+    const content = sanitizeCoachFeedback(extractModelText(result), 760);
+    if (content) return content;
+  } catch {
+    return fallbackRecordReviewFeedback(estimate, context);
+  }
+  return fallbackRecordReviewFeedback(estimate, context);
+}
+
 export interface RecordCoachContext {
   dashboard: DashboardData;
   bodySummary?: string | undefined;
@@ -387,6 +439,8 @@ export function buildLocalTextFallbackEstimate(text: string, fallbackMealType?: 
   const items = [];
   const bodyData = parseBodyDataText(text);
   const bodyDataSummary = summarizeBodyDataPatch(bodyData);
+  const exerciseEstimate = buildLocalExerciseFallbackEstimate(text);
+  if (exerciseEstimate) return exerciseEstimate;
 
   const eggMatch = text.match(/([一二两三四五六七八九十\d]+)\s*(?:个|颗)?(?:水煮|白煮|煮|蒸)?鸡蛋/);
   if (eggMatch) {
@@ -446,6 +500,89 @@ export function buildLocalTextFallbackEstimate(text: string, fallbackMealType?: 
     notes: "模型输出不可用时，根据文本中的明确食物和常见份量做了保守估算。",
     estimated: true
   };
+}
+
+function buildLocalExerciseFallbackEstimate(text: string): AiEstimate | null {
+  if (!/运动|锻炼|训练|步行|步数|走路|散步|跑步|骑行|游泳|跳绳|健腹轮|深蹲|俯卧撑|卷腹|仰卧起坐|力量|有氧/i.test(text)) return null;
+  if (/没有运动|没运动|未运动|无运动|没有锻炼|没锻炼/.test(text)) return null;
+
+  const parts: string[] = [];
+  let minutes = 0;
+  let calories = 0;
+
+  const steps = parseTextNumber(text.match(/([一二两三四五六七八九十\d]+(?:\.[0-9]+)?)\s*步/)?.[1]);
+  if (steps && steps > 0) {
+    const stepMinutes = Math.max(1, Math.round(steps / 100));
+    const stepCalories = Math.max(1, Math.round(steps * 0.04));
+    minutes += stepMinutes;
+    calories += stepCalories;
+    parts.push(`步行 ${formatNumber(steps)} 步`);
+  }
+
+  const abWheelCount = extractExerciseCount(text, "健腹轮");
+  if (abWheelCount && abWheelCount > 0) {
+    const abWheelMinutes = Math.max(3, Math.round(abWheelCount / 15));
+    minutes += abWheelMinutes;
+    calories += Math.max(1, Math.round(abWheelMinutes * 6));
+    parts.push(`健腹轮 ${formatNumber(abWheelCount)} 个`);
+  }
+
+  const squatCount = extractExerciseCount(text, "深蹲");
+  if (squatCount && squatCount > 0) {
+    const squatMinutes = Math.max(3, Math.round(squatCount / 20));
+    minutes += squatMinutes;
+    calories += Math.max(1, Math.round(squatMinutes * 7));
+    parts.push(`深蹲 ${formatNumber(squatCount)} 个`);
+  }
+
+  const pushUpCount = extractExerciseCount(text, "俯卧撑");
+  if (pushUpCount && pushUpCount > 0) {
+    const pushUpMinutes = Math.max(3, Math.round(pushUpCount / 15));
+    minutes += pushUpMinutes;
+    calories += Math.max(1, Math.round(pushUpMinutes * 7));
+    parts.push(`俯卧撑 ${formatNumber(pushUpCount)} 个`);
+  }
+
+  const durationMinutes = extractExerciseDurationMinutes(text);
+  if (durationMinutes && durationMinutes > minutes) {
+    minutes = durationMinutes;
+    calories = Math.max(calories, Math.round(durationMinutes * 6));
+    if (parts.length === 0) parts.push(`运动 ${formatNumber(durationMinutes)} 分钟`);
+  }
+
+  if (parts.length === 0 || minutes <= 0) return null;
+  return {
+    entryType: "exercise",
+    items: [],
+    exerciseMinutes: minutes,
+    exerciseCaloriesKcal: calories,
+    confidence: "medium",
+    notes: `本地兜底识别：${parts.join("，")}。AI 输出不可用时按常见强度估算，实际消耗会随体重、速度和动作质量波动。`,
+    estimated: true
+  };
+}
+
+function extractExerciseCount(text: string, label: string): number | null {
+  const numberPattern = "([一二两三四五六七八九十\\d]+(?:\\.[0-9]+)?)";
+  const afterLabel = text.match(new RegExp(`${label}\\s*${numberPattern}\\s*(?:个|次|下|组)?`));
+  const beforeLabel = text.match(new RegExp(`${numberPattern}\\s*(?:个|次|下|组)?\\s*${label}`));
+  return parseTextNumber(afterLabel?.[1] ?? beforeLabel?.[1]);
+}
+
+function extractExerciseDurationMinutes(text: string): number | null {
+  const numberPattern = "([一二两三四五六七八九十\\d]+(?:\\.[0-9]+)?)";
+  const match = text.match(new RegExp(`${numberPattern}\\s*(?:分钟|min|mins?)`, "i"));
+  return parseTextNumber(match?.[1]);
+}
+
+function parseTextNumber(value: string | undefined): number | null {
+  if (!value) return null;
+  if (/^\d+(?:\.\d+)?$/.test(value)) return Number(value);
+  return chineseNumberToInt(value);
+}
+
+function formatNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(1)));
 }
 
 function extractChoiceText(choices: unknown): string {
@@ -559,6 +696,108 @@ function latestBodyStateText(dashboard: DashboardData): string {
 
 function formatOptionalMetric(value: unknown, unit: string): string {
   return typeof value === "number" ? `${value} ${unit}` : "";
+}
+
+function recordDayLabel(context: RecordReviewContext): string {
+  return context.recordDate === context.localDate ? "今日" : "昨日";
+}
+
+function recordSummaryForReview(estimate: AiEstimate): string {
+  if (estimate.entryType === "meal") {
+    return `${mealLabels[estimate.mealType ?? "unknown"]}，${mealTotalText(estimate)}，${estimate.items.map((item) => `${item.name}${item.amount ? ` ${item.amount}` : ""}`).join("，") || "未拆分明细"}`;
+  }
+  if (estimate.entryType === "exercise") {
+    return `运动 ${estimate.exerciseMinutes ? `${Math.round(estimate.exerciseMinutes)} 分钟` : "时长待估"}，消耗 ${estimate.exerciseCaloriesKcal ? `${Math.round(estimate.exerciseCaloriesKcal)} kcal` : "待估"}，${estimate.notes ?? "未拆分明细"}`;
+  }
+  if (estimate.entryType === "measurement") return estimate.notes ?? "身体数据更新";
+  return estimate.notes ?? "未知记录";
+}
+
+function reviewRowsText(rows: Array<Record<string, unknown>>): string {
+  if (rows.length === 0) return "暂无";
+  return rows
+    .slice(0, 8)
+    .map((row) => {
+      const type = typeof row.meal_type === "string" ? `${mealLabels[(row.meal_type as MealType) ?? "unknown"] ?? row.meal_type} ` : "";
+      const minutes = typeof row.minutes === "number" ? `${Math.round(row.minutes)} 分钟 ` : "";
+      const calories = typeof row.calories_kcal === "number" ? `${Math.round(row.calories_kcal)} kcal ` : "";
+      const protein = typeof row.protein_g === "number" ? `蛋白 ${Math.round(row.protein_g)} g ` : "";
+      const summary = typeof row.summary === "string" ? row.summary : "";
+      return `${type}${minutes}${calories}${protein}${summary}`.trim();
+    })
+    .filter(Boolean)
+    .join("；");
+}
+
+function fallbackRecordReviewFeedback(estimate: AiEstimate, context: RecordReviewContext): string {
+  const label = recordDayLabel(context);
+  const prefix =
+    context.recordDate === context.localDate
+      ? ""
+      : estimate.entryType === "exercise"
+        ? `已按${label}运动记录复盘：${exerciseSummaryText(estimate)}。`
+        : `已按${label}记录复盘：${recordSummaryForReview(estimate)}。`;
+  return [
+    prefix,
+    fallbackMealScoreLine(context.daily, "breakfast"),
+    fallbackMealScoreLine(context.daily, "lunch"),
+    fallbackMealScoreLine(context.daily, "dinner"),
+    fallbackExerciseScoreLine(context.daily),
+    `${label}全天综合评分：${fallbackDailyScore(context.daily)}/100。${fallbackDailyComment(context.daily)}`,
+    context.recordDate === context.localDate
+      ? "下一步建议：优先补齐剩余餐次，晚餐注意蛋白质和蔬菜，主食按饥饿感适量。"
+      : "复盘提示：这是按目标日期已有记录估算的分数，缺失餐次会让综合分偏保守。"
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function fallbackMealScoreLine(data: DailyReviewData, mealType: "breakfast" | "lunch" | "dinner"): string {
+  const label = mealLabels[mealType];
+  const meals = data.meals.filter((meal) => meal.meal_type === mealType);
+  if (meals.length === 0) return `${label}评分：暂无。还没有${label}记录。`;
+  const calories = sumReviewRows(meals, "calories_kcal");
+  const protein = sumReviewRows(meals, "protein_g");
+  const score = Math.min(90, Math.max(62, 68 + (protein >= 25 ? 10 : protein >= 12 ? 5 : 0) + (calories >= 300 && calories <= 850 ? 8 : 0)));
+  const summary = meals.map((meal) => meal.summary).filter((value): value is string => typeof value === "string" && value.length > 0).join("、") || "已记录";
+  return `${label}评分：${score}/100。${summary}，${protein ? `蛋白约 ${Math.round(protein)} g` : "蛋白估算不足"}。`;
+}
+
+function fallbackExerciseScoreLine(data: DailyReviewData): string {
+  if (data.exerciseMinutes <= 0 && data.exerciseCaloriesKcal <= 0) return "运动评分：暂无。还没有明确运动记录。";
+  const score = Math.min(92, Math.max(65, 66 + (data.exerciseMinutes >= 45 ? 10 : 5) + (data.exerciseCaloriesKcal >= 250 ? 10 : data.exerciseCaloriesKcal >= 120 ? 6 : 0)));
+  return `运动评分：${score}/100。已记录约 ${Math.round(data.exerciseMinutes)} 分钟，消耗约 ${Math.round(data.exerciseCaloriesKcal)} kcal，活动量给当天加分。`;
+}
+
+function fallbackDailyScore(data: DailyReviewData): number {
+  return Math.min(
+    94,
+    Math.max(
+      58,
+      58 +
+        Math.min(data.mealCount, 3) * 6 +
+        (data.totalProteinG >= 100 ? 10 : data.totalProteinG >= 70 ? 7 : data.totalProteinG >= 40 ? 4 : 0) +
+        (data.exerciseCaloriesKcal >= 250 ? 10 : data.exerciseCaloriesKcal >= 120 ? 6 : 0) +
+        (data.latestWeightKg !== undefined ? 4 : 0)
+    )
+  );
+}
+
+function fallbackDailyComment(data: DailyReviewData): string {
+  if (data.mealCount < 3) return "运动和已记录饮食可以参考，但餐次还没补全。";
+  if (data.totalProteinG >= 90 && data.exerciseCaloriesKcal >= 200) return "蛋白和运动都有支撑，整体完成度不错。";
+  if (data.exerciseCaloriesKcal >= 200) return "运动完成不错，饮食结构还可以继续补蛋白。";
+  return "饮食记录有基础，运动量还可以继续补一点。";
+}
+
+function exerciseSummaryText(estimate: AiEstimate): string {
+  const minutes = estimate.exerciseMinutes ? `${Math.round(estimate.exerciseMinutes)} 分钟` : "运动";
+  const calories = estimate.exerciseCaloriesKcal ? `，约消耗 ${Math.round(estimate.exerciseCaloriesKcal)} kcal` : "";
+  return `${minutes}${calories}`;
+}
+
+function sumReviewRows(rows: Array<Record<string, unknown>>, key: string): number {
+  return rows.reduce((sum, row) => sum + Number(row[key] ?? 0), 0);
 }
 
 function fallbackRecordCoachFeedback(estimate: AiEstimate, context: RecordCoachContext): string {

@@ -1,5 +1,5 @@
 import type { AiEstimate, BodyProfile, DailyReviewData, DashboardData, Env, MeasurementPatch, ProfilePatch, StoredMessage, WeeklyReviewData } from "../types";
-import { localDate, localDateTime } from "./records";
+import { localDate, localDateTime, localTime } from "./records";
 
 export async function reserveTelegramUpdate(env: Env, updateId: number | undefined, userId: string): Promise<boolean> {
   if (updateId === undefined) return true;
@@ -26,9 +26,9 @@ export async function saveIncomingMessage(
   env: Env,
   message: StoredMessage,
   estimate: AiEstimate,
-  options: { rawText?: string | undefined; photoKey?: string | undefined; contentType?: string | undefined } = {}
+  options: { rawText?: string | undefined; photoKey?: string | undefined; contentType?: string | undefined; logDate?: string | undefined } = {}
 ): Promise<number> {
-  const date = localDate(env.TIMEZONE);
+  const date = options.logDate ?? localDate(env.TIMEZONE);
   const dailyLogId = await ensureDailyLog(env, message.fromUserName, date);
   const record = await env.DB.prepare(
     `INSERT INTO ai_estimates
@@ -91,9 +91,10 @@ export async function saveIncomingMessage(
   return record.id;
 }
 
-export async function saveMeasurements(env: Env, userId: string, measurements: MeasurementPatch): Promise<void> {
+export async function saveMeasurements(env: Env, userId: string, measurements: MeasurementPatch, logDate = localDate(env.TIMEZONE)): Promise<void> {
   if (Object.keys(measurements).length === 0) return;
-  const dailyLogId = await ensureDailyLog(env, userId);
+  const dailyLogId = await ensureDailyLog(env, userId, logDate);
+  const measuredAt = `${logDate} ${localTime(env.TIMEZONE)}`;
   await env.DB.prepare(
     `INSERT INTO measurements
       (daily_log_id, user_id, weight_kg, body_fat_percent, waist_cm, measured_at)
@@ -105,7 +106,7 @@ export async function saveMeasurements(env: Env, userId: string, measurements: M
       measurements.weightKg ?? null,
       measurements.bodyFatPercent ?? null,
       measurements.waistCm ?? null,
-      localDateTime(env.TIMEZONE)
+      measuredAt
     )
     .run();
 }

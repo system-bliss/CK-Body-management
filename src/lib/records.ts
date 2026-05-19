@@ -82,6 +82,11 @@ export function previousLocalDate(timeZone = "Asia/Shanghai", date = new Date())
   return shiftLocalDate(timeZone, date, -1);
 }
 
+export function recordDateForText(text: string, timeZone = "Asia/Shanghai", date = new Date()): string {
+  if (/补.*昨天|昨天|昨日|昨晚|前一天/.test(text)) return previousLocalDate(timeZone, date);
+  return localDate(timeZone, date);
+}
+
 export function localTime(timeZone = "Asia/Shanghai", date = new Date()): string {
   return new Intl.DateTimeFormat("en-GB", {
     timeZone,
