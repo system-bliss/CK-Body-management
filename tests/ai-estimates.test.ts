@@ -321,6 +321,39 @@ describe("AI estimate parsing", () => {
     expect(prompt).toContain("1320 kcal");
     expect(prompt).toContain("蛋白质 88 g");
     expect(prompt).toContain("身高 175 cm");
+    expect(prompt).toContain("不要重复");
+    expect(prompt).toContain("不输出标题");
+  });
+
+  it("deduplicates repetitive AI daily report sentences", async () => {
+    const env = {
+      AI: {
+        run: async () => ({
+          response:
+            "昨日只记录了 1 餐，数据置信度低，但运动表现亮眼。昨日只记录了 1 餐，数据置信度低，但运动表现亮眼。\n\n昨日只记录了 1 餐，数据置信度较低，估算摄入约 770 kcal，实际可能更高。\n运动很亮眼，138 分钟消耗 614 kcal，值得肯定。"
+        })
+      },
+      WORKERS_AI_TEXT_MODEL: "text-model"
+    } as unknown as Env;
+
+    const content = await generateDailyReport(env, {
+      date: "2026-05-19",
+      mealCount: 1,
+      totalCaloriesKcal: 770,
+      totalProteinG: 40,
+      totalCarbsG: 80,
+      totalFatG: 30,
+      exerciseMinutes: 138,
+      exerciseCaloriesKcal: 614,
+      meals: [],
+      exercises: [],
+      profile: {}
+    });
+
+    const repeated = content.match(/昨日只记录了 1 餐/g) ?? [];
+    expect(repeated).toHaveLength(1);
+    expect(content).toContain("138 分钟");
+    expect(content.length).toBeLessThanOrEqual(180);
   });
 
   it("builds an AI coach prompt with 100-point scoring and recent state", () => {
@@ -380,6 +413,54 @@ describe("AI estimate parsing", () => {
     expect(feedback).toContain("运动建议");
     expect(feedback).toContain("今日综合评分：78/100");
     expect(feedback).not.toContain("置信度");
+  });
+
+  it("strips model think tags from record feedback", async () => {
+    const env = {
+      AI: {
+        run: async () => ({
+          response:
+            "</think>早餐评分 72 分：蛋白质开局不错，但碳水过低。\n午餐评分 暂无。\n晚餐评分 暂无。\n运动评分 暂无。\n全天综合评分 55 分：目前仅有一餐。"
+        })
+      },
+      WORKERS_AI_TEXT_MODEL: "text-model"
+    } as unknown as Env;
+
+    const feedback = await generateRecordReviewFeedback(
+      env,
+      {
+        entryType: "meal",
+        mealType: "breakfast",
+        items: [{ name: "鸡蛋", amount: "2个", caloriesKcal: 156, proteinG: 12 }],
+        totalCaloriesKcal: 166,
+        totalProteinG: 12,
+        totalCarbsG: 2,
+        totalFatG: 10,
+        confidence: "medium",
+        estimated: true
+      },
+      {
+        daily: dailyReviewData({
+          date: "2026-05-20",
+          mealCount: 1,
+          totalCaloriesKcal: 166,
+          totalProteinG: 12,
+          totalCarbsG: 2,
+          totalFatG: 10,
+          exerciseMinutes: 0,
+          exerciseCaloriesKcal: 0,
+          meals: [{ log_date: "2026-05-20", meal_type: "breakfast", calories_kcal: 166, protein_g: 12, carbs_g: 2, fat_g: 10, summary: "鸡蛋、冰美式咖啡" }],
+          exercises: []
+        }),
+        recordDate: "2026-05-20",
+        localDate: "2026-05-20",
+        rawText: "今日早餐：2个鸡蛋，只吃了一个蛋黄。一大杯冰美式"
+      }
+    );
+
+    expect(feedback).toContain("早餐评分");
+    expect(feedback).not.toContain("<think>");
+    expect(feedback).not.toContain("</think>");
   });
 
   it("builds a record review prompt with body, meal, exercise and phase-score requirements", () => {

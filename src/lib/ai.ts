@@ -218,7 +218,9 @@ export function buildImageEstimatePrompt(hint?: string): string {
 export function buildDailyReportPrompt(data: DailyReviewData): string {
   return [
     "你是一个中文减脂塑形记录教练。请根据结构化数据写一条 Telegram 昨日复盘。",
-    "要求：80-160 字，分 3-5 行；务实、温和；不输出医疗建议；不要 Markdown 表格。",
+    "要求：120 字以上，分 2-4 行；务实、温和；不要重复句子或同义改写；不输出标题、日期标题、Markdown 表格或医疗建议。",
+    "只保留关键结论、一个亮点或风险、一个下一步动作；不要连续夸奖，不要复述同一个数据。",
+    data.mealCount < 2 ? "记录完整度偏低；如果提到数据不准或置信度低，只说一次。" : "",
     profileContext(data.profile),
     `昨日复盘日期：${data.date}`,
     `记录餐数：${data.mealCount}`,
@@ -240,7 +242,7 @@ export async function generateDailyReport(env: Env, data: DailyReviewData): Prom
       temperature: 0.4,
       chat_template_kwargs: { enable_thinking: false }
     });
-    return sanitizeShortText(extractModelText(result)) || fallbackDailyReport(data);
+    return sanitizeDailyReportText(extractModelText(result)) || fallbackDailyReport(data);
   } catch {
     return fallbackDailyReport(data);
   }
@@ -253,7 +255,7 @@ export function buildWeeklyReportPrompt(data: WeeklyReviewData): string {
       : "体重趋势：记录不足";
   return [
     "你是一个中文减脂塑形记录教练。请根据一周数据写一条 Telegram 周复盘。",
-    "要求：120-220 字，包含做得好的地方、下周重点和记录缺口；不要医疗建议。",
+    "要求：220 字以上，包含做得好的地方、下周重点和记录缺口；不要医疗建议。",
     profileContext(data.profile),
     `周期：${data.periodStart} 到 ${data.periodEnd}`,
     `记录餐数：${data.mealCount}`,
@@ -649,9 +651,37 @@ function sanitizeShortText(value: string, maxLength = 280): string {
 
 function stripModelTextDecorations(value: string): string {
   return value
+    .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, "")
+    .replace(/<\/?think\b[^>]*>/gi, "")
     .replace(/```[\s\S]*?```/g, "")
     .replace(/^["'“”]+|["'“”]+$/g, "")
     .trim();
+}
+
+function sanitizeDailyReportText(value: string, maxLength = 180): string {
+  const sentences = splitSentences(stripModelTextDecorations(value).replace(/\s+/g, " "));
+  const accepted: string[] = [];
+  const keys: string[] = [];
+
+  for (const rawSentence of sentences) {
+    const sentence = normalizeSentence(rawSentence);
+    const key = sentenceKey(sentence);
+    if (!key) continue;
+
+    const duplicateIndex = keys.findIndex((existing) => similarSentenceKey(existing, key));
+    if (duplicateIndex >= 0) {
+      if (dailySentenceScore(sentence) > dailySentenceScore(accepted[duplicateIndex] ?? "")) {
+        accepted[duplicateIndex] = sentence;
+        keys[duplicateIndex] = key;
+      }
+      continue;
+    }
+
+    accepted.push(sentence);
+    keys.push(key);
+  }
+
+  return joinLimitedLines(accepted, maxLength);
 }
 
 function sanitizeCoachFeedback(value: string, maxLength = 520): string {
@@ -670,6 +700,48 @@ function sanitizeCoachFeedback(value: string, maxLength = 520): string {
     truncatedLines.push(line);
   }
   return truncatedLines.join("\n").trim() || text.slice(0, maxLength).trim();
+}
+
+function splitSentences(value: string): string[] {
+  const cleaned = value.trim();
+  if (!cleaned) return [];
+  return cleaned.match(/[^。！？!?]+[。！？!?]?/g) ?? [cleaned];
+}
+
+function normalizeSentence(value: string): string {
+  const sentence = value.trim();
+  if (!sentence) return "";
+  return /[。！？!?]$/.test(sentence) ? sentence : `${sentence}。`;
+}
+
+function sentenceKey(value: string): string {
+  return value.replace(/[。！？!?，,、；;：:\s]/g, "").toLowerCase();
+}
+
+function similarSentenceKey(left: string, right: string): boolean {
+  if (left === right) return true;
+  if (left.length < 12 || right.length < 12) return false;
+  const prefixLength = 12;
+  return left.startsWith(right.slice(0, prefixLength)) || right.startsWith(left.slice(0, prefixLength));
+}
+
+function dailySentenceScore(value: string): number {
+  const numberScore = (value.match(/\d/g) ?? []).length * 3;
+  const metricScore = /kcal|分钟|蛋白|碳水|脂肪|体重/.test(value) ? 12 : 0;
+  return value.length + numberScore + metricScore;
+}
+
+function joinLimitedLines(lines: string[], maxLength: number): string {
+  const accepted: string[] = [];
+  for (const line of lines) {
+    const next = [...accepted, line].join("\n");
+    if (next.length > maxLength) {
+      if (accepted.length > 0) break;
+      return line.slice(0, maxLength).trim();
+    }
+    accepted.push(line);
+  }
+  return accepted.join("\n").trim();
 }
 
 function mealTotalText(estimate: AiEstimate): string {
